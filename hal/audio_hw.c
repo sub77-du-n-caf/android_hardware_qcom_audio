@@ -1128,7 +1128,7 @@ int start_input_stream(struct stream_in *in)
     ALOGV("%s: Opening PCM device card_id(%d) device_id(%d), channels %d",
           __func__, adev->snd_card, in->pcm_device_id, in->config.channels);
 
-    unsigned int flags = PCM_IN;
+    unsigned int flags = PCM_IN | PCM_MONOTONIC;
     unsigned int pcm_open_retry_entry_count = 0;
 
     if (in->usecase == USECASE_AUDIO_RECORD_AFE_PROXY) {
@@ -1921,9 +1921,6 @@ static int out_set_parameters(struct audio_stream *stream, const char *kvpairs)
         if (val != 0) {
             out->devices = val;
 
-            if (!out->standby)
-                select_devices(adev, out->usecase);
-
             if ((adev->mode == AUDIO_MODE_IN_CALL) &&
                     output_drives_call(adev, out)) {
                 adev->current_call_output = out;
@@ -1932,6 +1929,9 @@ static int out_set_parameters(struct audio_stream *stream, const char *kvpairs)
                 else
                     voice_update_devices_for_all_voice_usecases(adev);
              }
+
+            if (!out->standby)
+                select_devices(adev, out->usecase);
         }
 
         if ((adev->mode == AUDIO_MODE_NORMAL) &&
@@ -2630,6 +2630,8 @@ exit:
         ALOGV("%s: read failed - sleeping for buffer duration", __func__);
         usleep(bytes * 1000000 / audio_stream_in_frame_size(stream) /
                in_get_sample_rate(&in->stream.common));
+    } else {
+        in->frames_read += bytes / audio_stream_in_frame_size(stream);
     }
     return bytes;
 }
@@ -2637,6 +2639,29 @@ exit:
 static uint32_t in_get_input_frames_lost(struct audio_stream_in *stream __unused)
 {
     return 0;
+}
+
+static int in_get_capture_position(const struct audio_stream_in *stream,
+                                   int64_t *frames, int64_t *time)
+{
+    if (stream == NULL || frames == NULL || time == NULL) {
+        return -EINVAL;
+    }
+    struct stream_in *in = (struct stream_in *)stream;
+    int ret = -ENOSYS;
+
+    lock_input_stream(in);
+    if (in->pcm) {
+        struct timespec timestamp;
+        unsigned int avail;
+        if (pcm_get_htimestamp(in->pcm, &avail, &timestamp) == 0) {
+            *frames = in->frames_read + avail;
+            *time = timestamp.tv_sec * 1000000000LL + timestamp.tv_nsec;
+            ret = 0;
+        }
+    }
+    pthread_mutex_unlock(&in->lock);
+    return ret;
 }
 
 static int add_remove_audio_effect(const struct audio_stream *stream,
@@ -2768,7 +2793,8 @@ static int adev_open_output_stream(struct audio_hw_device *dev,
         out->config.period_size = HDMI_MULTI_PERIOD_BYTES / (out->config.channels * 2);
 #ifdef COMPRESS_VOIP_ENABLED
     } else if ((out->dev->mode == AUDIO_MODE_IN_COMMUNICATION) &&
-               (out->flags == (AUDIO_OUTPUT_FLAG_DIRECT | AUDIO_OUTPUT_FLAG_VOIP_RX)) &&
+               ((out->flags & ~AUDIO_OUTPUT_FLAG_RAW) ==
+                   (AUDIO_OUTPUT_FLAG_DIRECT | AUDIO_OUTPUT_FLAG_VOIP_RX)) &&
                (voice_extn_compress_voip_is_config_supported(config))) {
         ret = voice_extn_compress_voip_open_output_stream(out);
         if (ret != 0) {
@@ -3374,12 +3400,14 @@ static int adev_open_input_stream(struct audio_hw_device *dev,
     in->stream.set_gain = in_set_gain;
     in->stream.read = in_read;
     in->stream.get_input_frames_lost = in_get_input_frames_lost;
+    in->stream.get_capture_position = in_get_capture_position;
 
     in->device = devices;
     in->source = source;
     in->dev = adev;
     in->standby = 1;
     in->channel_mask = config->channel_mask;
+    // in->frames_read = 0;
 
     /* Update config params with the requested sample rate and channels */
     in->usecase = USECASE_AUDIO_RECORD;

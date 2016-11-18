@@ -59,7 +59,7 @@
  * 24 - lcm of channels supported by DSP
  */
 #define MAX_PCM_OFFLOAD_FRAGMENT_SIZE (240 * 1024)
-#define MIN_PCM_OFFLOAD_FRAGMENT_SIZE (4 * 1024)
+#define MIN_PCM_OFFLOAD_FRAGMENT_SIZE 512
 
 #define DIV_ROUND_UP(x, y) (((x) + (y) - 1)/(y))
 #define ALIGN(x, y) ((y) * DIV_ROUND_UP((x), (y)))
@@ -103,6 +103,9 @@ enum {
 	VOICE_FEATURE_SET_DEFAULT,
 	VOICE_FEATURE_SET_VOLUME_BOOST
 };
+
+#define TOSTRING_(x) #x
+#define TOSTRING(x) TOSTRING_(x)
 
 struct audio_block_header
 {
@@ -149,6 +152,8 @@ struct platform_data {
 
     void *hw_info;
     struct csd_data *csd;
+
+    int max_vol_index;
 };
 
 static int pcm_device_table[AUDIO_USECASE_MAX][2] = {
@@ -234,10 +239,14 @@ static char * device_table[SND_DEVICE_MAX] = {
     [SND_DEVICE_OUT_SPEAKER] = "speaker",
     [SND_DEVICE_OUT_SPEAKER_REVERSE] = "speaker-reverse",
     [SND_DEVICE_OUT_HEADPHONES] = "headphones",
+    [SND_DEVICE_OUT_LINE] = "line",
     [SND_DEVICE_OUT_SPEAKER_AND_HEADPHONES] = "speaker-and-headphones",
+    [SND_DEVICE_OUT_SPEAKER_AND_LINE] = "speaker-and-line",
     [SND_DEVICE_OUT_VOICE_HANDSET] = "voice-handset",
+    [SND_DEVICE_OUT_VOICE_HAC_HANDSET] = "voice-hac-handset",
     [SND_DEVICE_OUT_VOICE_SPEAKER] = "voice-speaker",
     [SND_DEVICE_OUT_VOICE_HEADPHONES] = "voice-headphones",
+    [SND_DEVICE_OUT_VOICE_LINE] = "voice-line",
     [SND_DEVICE_OUT_HDMI] = "hdmi",
     [SND_DEVICE_OUT_SPEAKER_AND_HDMI] = "speaker-and-hdmi",
     [SND_DEVICE_OUT_BT_SCO] = "bt-sco-headset",
@@ -316,10 +325,14 @@ static int acdb_device_table[SND_DEVICE_MAX] = {
     [SND_DEVICE_OUT_SPEAKER] = 14,
     [SND_DEVICE_OUT_SPEAKER_REVERSE] = 14,
     [SND_DEVICE_OUT_HEADPHONES] = 10,
+    [SND_DEVICE_OUT_LINE] = 77,
     [SND_DEVICE_OUT_SPEAKER_AND_HEADPHONES] = 10,
+    [SND_DEVICE_OUT_SPEAKER_AND_LINE] = 77,
     [SND_DEVICE_OUT_VOICE_HANDSET] = 7,
     [SND_DEVICE_OUT_VOICE_SPEAKER] = 14,
+    [SND_DEVICE_OUT_VOICE_HAC_HANDSET] = 53,
     [SND_DEVICE_OUT_VOICE_HEADPHONES] = 10,
+    [SND_DEVICE_OUT_VOICE_LINE] = 77,
     [SND_DEVICE_OUT_HDMI] = 18,
     [SND_DEVICE_OUT_SPEAKER_AND_HDMI] = 14,
     [SND_DEVICE_OUT_BT_SCO] = 22,
@@ -397,14 +410,18 @@ static struct name_to_index snd_device_name_index[SND_DEVICE_MAX] = {
     {TO_NAME_INDEX(SND_DEVICE_OUT_SPEAKER)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_SPEAKER_REVERSE)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_HEADPHONES)},
+    {TO_NAME_INDEX(SND_DEVICE_OUT_LINE)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_SPEAKER_AND_HEADPHONES)},
+    {TO_NAME_INDEX(SND_DEVICE_OUT_SPEAKER_AND_LINE)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_VOICE_HANDSET)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_VOICE_SPEAKER)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_VOICE_HEADPHONES)},
+    {TO_NAME_INDEX(SND_DEVICE_OUT_VOICE_LINE)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_HDMI)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_SPEAKER_AND_HDMI)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_BT_SCO)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_BT_SCO_WB)},
+    {TO_NAME_INDEX(SND_DEVICE_OUT_VOICE_HAC_HANDSET)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_VOICE_TTY_FULL_HEADPHONES)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_VOICE_TTY_VCO_HEADPHONES)},
     {TO_NAME_INDEX(SND_DEVICE_OUT_VOICE_TTY_HCO_HANDSET)},
@@ -903,6 +920,10 @@ void *platform_init(struct audio_device *adev)
         return NULL;
     }
 
+    //set max volume step for voice call
+    property_get("ro.config.vc_call_vol_steps", value, TOSTRING(MAX_VOL_INDEX));
+    my_data->max_vol_index = atoi(value);
+
     my_data->adev = adev;
     my_data->btsco_sample_rate = SAMPLE_RATE_8KHZ;
     my_data->fluence_in_spkr_mode = false;
@@ -1349,7 +1370,7 @@ int platform_set_voice_volume(void *platform, int volume)
     // Voice volume levels are mapped to adsp volume levels as follows.
     // 100 -> 5, 80 -> 4, 60 -> 3, 40 -> 2, 20 -> 1  0 -> 0
     // But this values don't changed in kernel. So, below change is need.
-    vol_index = (int)percent_to_index(volume, MIN_VOL_INDEX, MAX_VOL_INDEX);
+    vol_index = (int)percent_to_index(volume, MIN_VOL_INDEX, my_data->max_vol_index);
     set_values[0] = vol_index;
 
     ctl = mixer_get_ctl_by_name(adev->mixer, mixer_ctl_name);
@@ -1460,6 +1481,9 @@ snd_device_t platform_get_output_snd_device(void *platform, audio_devices_t devi
         if (devices == (AUDIO_DEVICE_OUT_WIRED_HEADPHONE |
                         AUDIO_DEVICE_OUT_SPEAKER)) {
             snd_device = SND_DEVICE_OUT_SPEAKER_AND_HEADPHONES;
+        } else if (devices == (AUDIO_DEVICE_OUT_LINE |
+                               AUDIO_DEVICE_OUT_SPEAKER)) {
+            snd_device = SND_DEVICE_OUT_SPEAKER_AND_LINE;
         } else if (devices == (AUDIO_DEVICE_OUT_WIRED_HEADSET |
                                AUDIO_DEVICE_OUT_SPEAKER)) {
             if (audio_extn_get_anc_enabled())
@@ -1541,7 +1565,9 @@ snd_device_t platform_get_output_snd_device(void *platform, audio_devices_t devi
             snd_device = SND_DEVICE_OUT_TRANSMISSION_FM;
 #endif
         } else if (devices & AUDIO_DEVICE_OUT_EARPIECE) {
-            if (audio_extn_should_use_handset_anc(channel_count))
+            if (adev->voice.hac)
+                snd_device = SND_DEVICE_OUT_VOICE_HAC_HANDSET;
+            else if (audio_extn_should_use_handset_anc(channel_count))
                 snd_device = SND_DEVICE_OUT_ANC_HANDSET;
             else if (voice_extn_compress_voip_is_active(adev) &&
                     voice_extn_dedicated_voip_device_prop_check())
@@ -1567,6 +1593,8 @@ snd_device_t platform_get_output_snd_device(void *platform, audio_devices_t devi
         }
         else
             snd_device = SND_DEVICE_OUT_HEADPHONES;
+    } else if (devices & AUDIO_DEVICE_OUT_LINE) {
+        snd_device = SND_DEVICE_OUT_LINE;
     } else if (devices & AUDIO_DEVICE_OUT_SPEAKER) {
         if (adev->speaker_lr_swap)
             snd_device = SND_DEVICE_OUT_SPEAKER_REVERSE;
@@ -1589,7 +1617,11 @@ snd_device_t platform_get_output_snd_device(void *platform, audio_devices_t devi
         snd_device = SND_DEVICE_OUT_TRANSMISSION_FM;
 #endif
     } else if (devices & AUDIO_DEVICE_OUT_EARPIECE) {
-        snd_device = SND_DEVICE_OUT_HANDSET;
+        /*HAC support for voice-ish audio (eg visual voicemail)*/
+        if (adev->voice.hac)
+            snd_device = SND_DEVICE_OUT_VOICE_HAC_HANDSET;
+        else
+            snd_device = SND_DEVICE_OUT_HANDSET;
 #ifdef AFE_PROXY_ENABLED
     } else if (devices & AUDIO_DEVICE_OUT_PROXY) {
         channel_count = audio_extn_get_afe_proxy_channel_count();
@@ -1628,7 +1660,8 @@ snd_device_t platform_get_input_snd_device(void *platform, audio_devices_t out_d
         if ((adev->voice.tty_mode != TTY_MODE_OFF) &&
             !voice_extn_compress_voip_is_active(adev)) {
             if (out_device & AUDIO_DEVICE_OUT_WIRED_HEADPHONE ||
-                out_device & AUDIO_DEVICE_OUT_WIRED_HEADSET) {
+                out_device & AUDIO_DEVICE_OUT_WIRED_HEADSET ||
+                out_device & AUDIO_DEVICE_OUT_LINE) {
                 switch (adev->voice.tty_mode) {
                 case TTY_MODE_FULL:
                     snd_device = SND_DEVICE_IN_VOICE_TTY_FULL_HEADSET_MIC;
@@ -1646,8 +1679,7 @@ snd_device_t platform_get_input_snd_device(void *platform, audio_devices_t out_d
                 goto exit;
             }
         }
-        if (out_device & AUDIO_DEVICE_OUT_EARPIECE ||
-            out_device & AUDIO_DEVICE_OUT_WIRED_HEADPHONE) {
+        if (out_device & AUDIO_DEVICE_OUT_EARPIECE) {
             if (out_device & AUDIO_DEVICE_OUT_EARPIECE &&
                 audio_extn_should_use_handset_anc(channel_count)) {
                 snd_device = SND_DEVICE_IN_AANC_HANDSET_MIC;
@@ -1667,7 +1699,9 @@ snd_device_t platform_get_input_snd_device(void *platform, audio_devices_t out_d
                 snd_device = SND_DEVICE_IN_BT_SCO_MIC_WB;
             else
                 snd_device = SND_DEVICE_IN_BT_SCO_MIC;
-        } else if (out_device & AUDIO_DEVICE_OUT_SPEAKER) {
+        } else if (out_device & AUDIO_DEVICE_OUT_SPEAKER ||
+                out_device & AUDIO_DEVICE_OUT_WIRED_HEADPHONE ||
+                out_device & AUDIO_DEVICE_OUT_LINE) {
             if (my_data->fluence_type != FLUENCE_NONE &&
                 my_data->fluence_in_voice_call &&
                 my_data->fluence_in_spkr_mode) {
@@ -1835,8 +1869,9 @@ snd_device_t platform_get_input_snd_device(void *platform, audio_devices_t out_d
                 snd_device = SND_DEVICE_IN_SPEAKER_STEREO_DMIC;
             else
                 snd_device = SND_DEVICE_IN_SPEAKER_MIC;
-        } else if (out_device & AUDIO_DEVICE_OUT_WIRED_HEADPHONE) {
-            snd_device = SND_DEVICE_IN_HANDSET_MIC;
+        } else if (out_device & AUDIO_DEVICE_OUT_WIRED_HEADPHONE ||
+                   out_device & AUDIO_DEVICE_OUT_LINE) {
+            snd_device = SND_DEVICE_IN_SPEAKER_MIC;
         } else if (out_device & AUDIO_DEVICE_OUT_BLUETOOTH_SCO_HEADSET) {
             if (my_data->btsco_sample_rate == SAMPLE_RATE_16KHZ)
                 snd_device = SND_DEVICE_IN_BT_SCO_MIC_WB;
@@ -1989,6 +2024,20 @@ int platform_set_parameters(void *platform, struct str_parms *parms)
 
     ALOGV_IF(kv_pairs != NULL, "%s: enter: %s", __func__, kv_pairs);
 
+#ifdef PLATFORM_APQ8084
+    err = str_parms_get_str(parms, AUDIO_PARAMETER_KEY_BT_SCO_WB, value, sizeof(value));
+    if (err >= 0) {
+        str_parms_del(parms, AUDIO_PARAMETER_KEY_BT_SCO_WB);
+        if (!strcmp(value, AUDIO_PARAMETER_VALUE_ON)) {
+            my_data->btsco_sample_rate = SAMPLE_RATE_16KHZ;
+            audio_route_apply_path(my_data->adev->audio_route,
+                                   "bt-sco-wb-samplerate");
+            audio_route_update_mixer(my_data->adev->audio_route);
+        } else {
+            my_data->btsco_sample_rate = SAMPLE_RATE_8KHZ;
+        }
+    }
+#else
     err = str_parms_get_int(parms, AUDIO_PARAMETER_KEY_BTSCO, &val);
     if (err >= 0) {
         str_parms_del(parms, AUDIO_PARAMETER_KEY_BTSCO);
@@ -1999,6 +2048,7 @@ int platform_set_parameters(void *platform, struct str_parms *parms)
             audio_route_update_mixer(my_data->adev->audio_route);
         }
     }
+#endif
 
     err = str_parms_get_str(parms, AUDIO_PARAMETER_KEY_SLOWTALK, value, sizeof(value));
     if (err >= 0) {
